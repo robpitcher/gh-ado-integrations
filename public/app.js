@@ -19,9 +19,16 @@ function renderList(shipments) {
   shipments.forEach((s) => {
     const li = document.createElement('li');
     li.dataset.id = s.id;
-    li.innerHTML =
-      `<div class="sid">${s.id}${s.hasException ? ' ⚠️' : ''}</div>` +
-      `<div class="sroute">${s.origin} → ${s.destination}</div>`;
+    const shipmentId = document.createElement('div');
+    shipmentId.className = 'sid';
+    shipmentId.textContent = `${s.id}${s.hasException ? ' ⚠️' : ''}`;
+
+    const route = document.createElement('div');
+    route.className = 'sroute';
+    route.textContent = `${s.origin} → ${s.destination}`;
+
+    li.appendChild(shipmentId);
+    li.appendChild(route);
     li.addEventListener('click', () => selectShipment(s.id));
     ul.appendChild(li);
   });
@@ -67,10 +74,23 @@ async function selectShipment(id) {
   ol.innerHTML = '';
   events.events.forEach((e) => {
     const li = document.createElement('li');
-    li.innerHTML =
-      `<span class="tstatus">${e.status.replace(/_/g, ' ')}</span> — ` +
-      `<span class="tnote">${e.note}</span><br/>` +
-      `<span class="tat">${fmt(e.at)}</span>`;
+    const status = document.createElement('span');
+    status.className = 'tstatus';
+    status.textContent = e.status.replace(/_/g, ' ');
+
+    const note = document.createElement('span');
+    note.className = 'tnote';
+    note.textContent = e.note;
+
+    const at = document.createElement('span');
+    at.className = 'tat';
+    at.textContent = fmt(e.at);
+
+    li.appendChild(status);
+    li.appendChild(document.createTextNode(' — '));
+    li.appendChild(note);
+    li.appendChild(document.createElement('br'));
+    li.appendChild(at);
     ol.appendChild(li);
   });
 }
