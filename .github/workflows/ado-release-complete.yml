@@ -1,0 +1,219 @@
+# Reusable workflow: complete release tracking after production deploy succeeds.
+#
+# This is called by deploy.yml after deploy-prod, so by construction it runs only
+# after the production environment gate is approved and deployment succeeds.
+# It closes linked stories, closes/stamps the Release work item, and publishes the
+# GitHub Release (which writes the tag that bounds the next release).
+name: ADO Release Complete
+
+on:
+  workflow_call:
+    inputs:
+      ado-org-url:
+        required: true
+        type: string
+      ado-project:
+        required: true
+        type: string
+      version:
+        required: true
+        type: string
+      commit-sha:
+        required: false
+        type: string
+        default: ''
+      done-state:
+        required: false
+        type: string
+        default: 'Closed'
+    secrets:
+      ADO_PAT:
+        required: false
+
+permissions:
+  contents: read
+
+jobs:
+  complete:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write   # gh release create (which also creates the tag)
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Complete the release
+        continue-on-error: true
+        shell: bash
+        env:
+          ADO_ORG_URL: ${{ inputs.ado-org-url }}
+          ADO_PROJECT: ${{ inputs.ado-project }}
+          VERSION: ${{ inputs.version }}
+          COMMIT_SHA: ${{ inputs.commit-sha }}
+          DONE_STATE: ${{ inputs.done-state }}
+          ADO_PAT: ${{ secrets.ADO_PAT }}
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -u
+
+          if [ -z "${ADO_PAT:-}" ]; then
+            echo "### Release completion — $VERSION" >> "$GITHUB_STEP_SUMMARY"
+            echo ":warning: ADO_PAT is not configured; skipping release completion updates." >> "$GITHUB_STEP_SUMMARY"
+            exit 0
+          fi
+
+          if [ -z "${COMMIT_SHA:-}" ]; then
+            COMMIT_SHA="${GITHUB_SHA}"
+          fi
+
+          org="${ADO_ORG_URL%/}"
+          if [[ ! "$org" =~ ^https?:// ]]; then
+            org="https://dev.azure.com/$org"
+          fi
+          proj_enc="$(printf '%s' "$ADO_PROJECT" | jq -sRr @uri)"
+          proj_api="$org/$proj_enc/_apis"
+
+          ado_request() {
+            local method="$1"
+            local url="$2"
+            local body="${3-}"
+            local content_type="${4-application/json}"
+            local response
+            if [ -n "$body" ]; then
+              response="$(curl -sS -u ":$ADO_PAT" -X "$method" -H "Content-Type: $content_type" "$url" --data "$body" -w $'\n%{http_code}')"
+            else
+              response="$(curl -sS -u ":$ADO_PAT" -X "$method" -H "Content-Type: $content_type" "$url" -w $'\n%{http_code}')"
+            fi
+            ADO_STATUS="${response##*$'\n'}"
+            ADO_BODY="${response%$'\n'*}"
+          }
+
+          is_ok_status() {
+            [[ "$1" =~ ^2[0-9][0-9]$ ]]
+          }
+
+          ADO_STATUS=""
+          ADO_BODY=""
+
+          wiql_payload="$(jq -cn --arg p "$ADO_PROJECT" --arg v "$VERSION" \
+            '{query: ("SELECT [System.Id] FROM WorkItems WHERE [System.TeamProject] = '\''" + $p + "'\'' AND [System.WorkItemType] = '\''Release'\'' AND [Custom.ReleaseVersion] = '\''" + $v + "'\''")}')"
+          ado_request POST "$proj_api/wit/wiql?api-version=7.1" "$wiql_payload"
+          wiql_json="$ADO_BODY"
+          if ! is_ok_status "$ADO_STATUS"; then
+            echo "### Release completion — $VERSION" >> "$GITHUB_STEP_SUMMARY"
+            echo ":warning: Could not query Azure DevOps releases (HTTP $ADO_STATUS)." >> "$GITHUB_STEP_SUMMARY"
+            exit 0
+          fi
+
+          release_id="$(jq -r '.workItems[0].id // empty' <<<"$wiql_json" 2>/dev/null || true)"
+          if [ -z "$release_id" ]; then
+            echo "### Release completion — $VERSION" >> "$GITHUB_STEP_SUMMARY"
+            echo ":warning: No Release work item found for version \`$VERSION\`." >> "$GITHUB_STEP_SUMMARY"
+            exit 0
+          fi
+
+          ado_request GET "$proj_api/wit/workitems/$release_id?\$expand=all&api-version=7.1"
+          release_json="$ADO_BODY"
+          if ! is_ok_status "$ADO_STATUS"; then
+            echo "### Release completion — $VERSION" >> "$GITHUB_STEP_SUMMARY"
+            echo ":warning: Could not load Release work item #$release_id (HTTP $ADO_STATUS)." >> "$GITHUB_STEP_SUMMARY"
+            exit 0
+          fi
+
+          release_title="$(jq -r '.fields["System.Title"] // ""' <<<"$release_json")"
+          release_state="$(jq -r '.fields["System.State"] // ""' <<<"$release_json")"
+
+          related_ids="$(
+            jq -r '.relations[]? | select(.rel=="System.LinkTypes.Related") | .url | capture("/workItems/(?<id>[0-9]+)$").id' <<<"$release_json" 2>/dev/null || true
+          )"
+          if [ -z "$related_ids" ]; then
+            {
+              echo "### Release completion — $VERSION"
+              echo
+              echo ":warning: Release **$release_title** has no linked work items. Skipping close-out and tag publication."
+            } >> "$GITHUB_STEP_SUMMARY"
+            exit 0
+          fi
+
+          closed=()
+          skipped=()
+          blocked=()
+
+          while IFS= read -r id; do
+            [ -z "$id" ] && continue
+            ado_request GET "$proj_api/wit/workitems/$id?api-version=7.1"
+            wi_json="$ADO_BODY"
+            if ! is_ok_status "$ADO_STATUS"; then
+              blocked+=("AB#$id (could not load)")
+              continue
+            fi
+            title="$(jq -r '.fields["System.Title"] // ""' <<<"$wi_json")"
+            state="$(jq -r '.fields["System.State"] // ""' <<<"$wi_json")"
+            if [ "$state" = "$DONE_STATE" ]; then
+              skipped+=("AB#$id $title")
+              continue
+            fi
+            done_patch="$(jq -cn --arg s "$DONE_STATE" '[{op:"add",path:"/fields/System.State",value:$s}]')"
+            ado_request PATCH "$proj_api/wit/workitems/$id?api-version=7.1" "$done_patch" "application/json-patch+json"
+            if is_ok_status "$ADO_STATUS"; then
+              closed+=("AB#$id $title")
+            else
+              blocked+=("AB#$id $title")
+            fi
+          done <<< "$related_ids"
+
+          release_url=""
+          if gh release view "$VERSION" --json url >/tmp/release.json 2>/dev/null; then
+            release_url="$(jq -r '.url // ""' /tmp/release.json)"
+          else
+            if gh release create "$VERSION" --target "$COMMIT_SHA" --generate-notes --title "$VERSION" >/dev/null 2>&1; then
+              if gh release view "$VERSION" --json url >/tmp/release.json 2>/dev/null; then
+                release_url="$(jq -r '.url // ""' /tmp/release.json)"
+              fi
+            fi
+          fi
+
+          if [ "$release_state" != "Closed" ]; then
+            deployed_on="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+            release_patch="$(jq -cn \
+              --arg s "Closed" \
+              --arg on "$deployed_on" \
+              --arg by "${GITHUB_ACTOR:-unknown}" \
+              --arg notes "$release_url" \
+              '[{op:"add",path:"/fields/System.State",value:$s},{op:"add",path:"/fields/Custom.DeployedOn",value:$on},{op:"add",path:"/fields/Custom.DeployedBy",value:$by}] + (if $notes == "" then [] else [{op:"add",path:"/fields/Custom.ReleaseNotesUrl",value:$notes}] end)')"
+            ado_request PATCH "$proj_api/wit/workitems/$release_id?api-version=7.1" "$release_patch" "application/json-patch+json"
+          fi
+
+          {
+            echo "### Release completion — $VERSION"
+            echo
+            echo "- Release: **$release_title** (#$release_id)"
+            echo "- Deployed commit: \`$COMMIT_SHA\`"
+            echo
+            echo "#### Stories closed"
+            if [ "${#closed[@]}" -eq 0 ]; then
+              echo "_None._"
+            else
+              for item in "${closed[@]}"; do echo "- $item"; done
+            fi
+            echo
+            echo "#### Stories already done (skipped)"
+            if [ "${#skipped[@]}" -eq 0 ]; then
+              echo "_None._"
+            else
+              for item in "${skipped[@]}"; do echo "- $item"; done
+            fi
+            echo
+            echo "#### :warning: Stories needing manual follow-up"
+            if [ "${#blocked[@]}" -eq 0 ]; then
+              echo "_None._"
+            else
+              for item in "${blocked[@]}"; do echo "- $item"; done
+            fi
+            echo
+            echo "#### GitHub Release"
+            if [ -n "$release_url" ]; then
+              echo "[$VERSION]($release_url)"
+            else
+              echo "_Not published._"
+            fi
+          } >> "$GITHUB_STEP_SUMMARY"

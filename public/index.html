@@ -1,0 +1,43 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Contoso Logistics — Shipment Tracking</title>
+  <link rel="stylesheet" href="styles.css" />
+</head>
+<body>
+  <header class="topbar">
+    <h1>Contoso Logistics</h1>
+    <span class="tagline">Shipment Tracking</span>
+  </header>
+
+  <main class="layout">
+    <section class="list-pane">
+      <h2>Active Shipments</h2>
+      <ul id="shipment-list" class="shipment-list"></ul>
+    </section>
+
+    <section class="detail-pane">
+      <div id="detail-empty" class="empty">Select a shipment to see details.</div>
+      <article id="detail" class="detail hidden">
+        <h2 id="detail-id"></h2>
+        <p class="route"><span id="detail-origin"></span> &rarr; <span id="detail-destination"></span></p>
+        <div class="meta">
+          <div><strong>Customer:</strong> <span id="detail-customer"></span></div>
+          <div><strong>Carrier:</strong> <span id="detail-carrier"></span></div>
+          <div><strong>Status:</strong> <span id="detail-status" class="badge"></span></div>
+          <div><strong>Delivery window:</strong> <span id="detail-window"></span></div>
+        </div>
+        <div id="detail-exception" class="exception hidden"></div>
+        <h3>Location</h3>
+        <p id="detail-location" class="location"></p>
+        <h3>Timeline</h3>
+        <ol id="detail-timeline" class="timeline"></ol>
+      </article>
+    </section>
+  </main>
+
+  <script src="app.js"></script>
+</body>
+</html>
