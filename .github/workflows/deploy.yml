@@ -1,0 +1,147 @@
+# Multi-environment deploy workflow, triggered by every merge into main.
+#
+# Models the two events the whole release-tracking scenario hangs off:
+#   - Merging into main decides MEMBERSHIP (what's in the pending release)
+#   - The production deployment succeeding is the DEFINITION OF DONE (it shipped)
+# Those are deliberately separate jobs/workflows so each can be reasoned about on
+# its own. See ado-release-sync.yml (membership) and ado-release-complete.yml
+# (completion), both wired in below.
+#
+# There is no release branch. Story pull requests land on main like any normal
+# repository, and a release is the span between two tags: sync computes
+# `<previous release tag>..HEAD`, and completion writes the tag that bounds the
+# next release. `version` in package.json chooses WHICH release is pending —
+# bumping it is the one human act that opens the next one.
+#
+# The cost of triggering on main is that every merge queues a production approval.
+# That's intended (it's what continuous delivery actually looks like); the demo
+# guidance is to cancel intermediate runs and approve the last one, whose commit
+# range is the whole release.
+#
+# This is a demo app with no real infrastructure: deploy steps are simulated but
+# honest (npm ci/test actually run and can fail; the "deploy" itself just echoes
+# what would happen). No fake cloud credentials or provider actions are used —
+# the point of the lab is the work-tracking integration, not deployment mechanics.
+name: Deploy
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+# Keyed on the branch so two pushes queue rather than race. cancel-in-progress is
+# deliberately false: cancelling a half-finished production deploy is worse than
+# waiting for it to finish before the next runs.
+concurrency:
+  group: deploy-${{ github.ref }}
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+  deployments: write
+
+jobs:
+  resolve-release:
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.resolve.outputs.version }}
+      sha: ${{ steps.resolve.outputs.sha }}
+    steps:
+      - uses: actions/checkout@v4
+      - id: resolve
+        run: |
+          version="$(jq -r .version package.json)"
+          sha="${{ github.sha }}"
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+          echo "sha=$sha" >> "$GITHUB_OUTPUT"
+          echo "### Resolved release" >> "$GITHUB_STEP_SUMMARY"
+          echo "- version: \`$version\` (from package.json — this selects the Release work item)" >> "$GITHUB_STEP_SUMMARY"
+          echo "- commit: \`$sha\`" >> "$GITHUB_STEP_SUMMARY"
+
+  # Membership is decided at merge time, not at deploy time, so this runs early —
+  # right after resolve-release, and does not wait behind the production gate.
+  sync-release-membership:
+    needs: resolve-release
+    # NOTE: `continue-on-error` is NOT valid on a job that calls a reusable workflow
+    # with `uses:` — GitHub rejects the entire workflow file, and every job in it
+    # (including the deploys) silently never runs. The "work-tracking automation must
+    # never fail a deployment" rule is therefore enforced INSIDE ado-release-sync.yml,
+    # at the step level, plus the script's own always-exit-0 behaviour.
+    permissions:
+      contents: read
+      pull-requests: read   # Current release sync derives membership from commit messages only.
+    uses: ./.github/workflows/ado-release-sync.yml
+    with:
+      ado-org-url: ${{ vars.ADO_ORG_URL }}
+      ado-project: ${{ vars.ADO_PROJECT }}
+      release-version: ${{ needs.resolve-release.outputs.version }}
+    secrets: inherit
+
+  deploy-dev:
+    needs: resolve-release
+    runs-on: ubuntu-latest
+    environment:
+      name: dev
+      url: https://dev.contoso-logistics.example.com
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+      - run: npm ci
+      - run: npm test
+      - name: Simulate deploy
+        run: |
+          echo "Deploying version=${{ needs.resolve-release.outputs.version }} sha=${{ github.sha }} to dev"
+          sleep 5
+          echo "Deployed to dev."
+
+  deploy-stage:
+    needs: [resolve-release, deploy-dev]
+    runs-on: ubuntu-latest
+    environment:
+      name: stage
+      url: https://stage.contoso-logistics.example.com
+    steps:
+      - name: Simulate deploy
+        run: |
+          echo "Deploying version=${{ needs.resolve-release.outputs.version }} sha=${{ github.sha }} to stage"
+          sleep 5
+          echo "Deployed to stage."
+
+  # `environment: production` is what makes GitHub block this job on the required
+  # reviewer configured in provision/10-GitHubEnvironments.ps1. THE GATE IS THE
+  # ENVIRONMENT, not the trigger — do not try to gate this with a branch condition
+  # or a workflow_dispatch input instead.
+  deploy-prod:
+    needs: [resolve-release, deploy-stage]
+    runs-on: ubuntu-latest
+    environment:
+      name: production
+      url: https://contoso-logistics.example.com
+    steps:
+      - name: Simulate deploy
+        run: |
+          echo "Deploying version=${{ needs.resolve-release.outputs.version }} sha=${{ github.sha }} to production"
+          sleep 5
+          echo "Deployed to production."
+
+  # A reusable workflow call (`uses:`) must be its own job — it can't run as a step
+  # inside deploy-prod. Depending on deploy-prod is what keeps this "post-approval
+  # by construction": deploy-prod's `environment: production` already blocked on
+  # the required reviewer, and this job cannot start until that job finishes. No
+  # webhook listener needed to detect approval; the dependency graph IS the gate.
+  complete-release:
+    needs: [resolve-release, deploy-prod]
+    # Same rule as sync-release-membership above, and the same constraint: a `uses:`
+    # job may not set `continue-on-error`, so the never-fail-the-deploy guarantee
+    # lives inside ado-release-complete.yml at the step level instead.
+    permissions:
+      contents: write   # ado-release-complete.yml's gh release create also writes the tag
+    uses: ./.github/workflows/ado-release-complete.yml
+    with:
+      ado-org-url: ${{ vars.ADO_ORG_URL }}
+      ado-project: ${{ vars.ADO_PROJECT }}
+      version: ${{ needs.resolve-release.outputs.version }}
+      commit-sha: ${{ needs.resolve-release.outputs.sha }}
+    secrets: inherit

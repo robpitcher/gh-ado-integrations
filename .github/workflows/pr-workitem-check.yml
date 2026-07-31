@@ -1,0 +1,118 @@
+# Checks that a pull request carries an AB# reference, so release membership can be
+# derived from merge history without manual reconciliation.
+#
+# Any ONE of these passes:
+#   1. AB#<id> in PR title (preferred)
+#   2. AB#<id> in PR body
+#   3. AB#<id> in any commit message
+#   4. AB#<id> in a PR comment
+#
+# MERGE-MESSAGE CAVEAT: ado-release-sync.yml reads AB# out of commit messages on
+# main, not live pull request metadata. A title/body-only reference reaches that
+# history only when the selected squash or merge commit template includes the PR
+# title and description; rebase merging requires a source commit reference.
+# Comment-only references can pass this check but never reach commit history.
+#
+# The check below emits a targeted warning for one common mismatch: a body-only
+# reference when the repository's squash template omits the PR body. It cannot
+# predict which merge method the user will ultimately select.
+#
+# This workflow only produces a STATUS CHECK. To enforce it, require this check in
+# a repository ruleset/branch protection policy.
+name: PR Work Item Check
+
+on:
+  pull_request:
+    types: [opened, edited, synchronize, reopened]
+
+permissions:
+  contents: read
+  pull-requests: read
+
+jobs:
+  # Keep this job name stable — it's what you select as a required status check
+  # in branch protection / repository rulesets.
+  check-work-item-reference:
+    name: check-work-item-reference
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Check for a linked work item
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PR_TITLE: ${{ github.event.pull_request.title }}
+          PR_BODY: ${{ github.event.pull_request.body }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+          REPO: ${{ github.repository }}
+          # 'error' (default) fails the check; 'warn' always passes but still
+          # surfaces the same summary — useful for a soft-launch period.
+          ENFORCEMENT: ${{ vars.WORK_ITEM_CHECK_ENFORCEMENT || 'error' }}
+        run: |
+          set -uo pipefail
+          pattern='AB#[0-9]+'
+
+          first_match() { grep -iEo "$pattern" <<< "${1:-}" | head -n1 || true; }
+
+          title_match=$(first_match "$PR_TITLE")
+          body_match=$(first_match "$PR_BODY")
+
+          commit_messages=$(gh api --paginate "repos/$REPO/pulls/$PR_NUMBER/commits" --jq '.[].commit.message' 2>/dev/null || true)
+          commit_match=$(first_match "$commit_messages")
+
+          comment_bodies=$(gh api --paginate "repos/$REPO/issues/$PR_NUMBER/comments" --jq '.[].body' 2>/dev/null || true)
+          comment_match=$(first_match "$comment_bodies")
+
+          {
+            echo "## Work item reference check"
+            echo
+            echo "| Where | Found |"
+            echo "|---|---|"
+            echo "| PR title | ${title_match:-—} |"
+            echo "| PR body | ${body_match:-—} |"
+            echo "| Commit messages | ${commit_match:-—} |"
+            echo "| PR comments | ${comment_match:-—} |"
+            echo
+          } >> "$GITHUB_STEP_SUMMARY"
+
+          # Warn about one common mismatch: a body-only reference and a squash
+          # template that omits the PR body.
+          if [ -z "$title_match" ] && [ -z "$commit_match" ] && [ -n "$body_match" ]; then
+            squash_msg=$(gh api "repos/$REPO" --jq '.squash_merge_commit_message // ""' 2>/dev/null || true)
+            if [ -n "$squash_msg" ] && [ "$squash_msg" != "PR_BODY" ]; then
+              {
+                echo ":warning: **$body_match** is only in the PR description, and this repository's squash-merge setting is \`$squash_msg\` — the description is not carried into the merge commit."
+                echo
+                echo "Set **Settings → Pull Requests → Default commit message → _Pull request title and description_**, or move the reference into the PR title."
+                echo
+              } >> "$GITHUB_STEP_SUMMARY"
+              echo "::warning::AB# reference is PR-body-only and squash_merge_commit_message=$squash_msg."
+            fi
+          fi
+
+          if [ -n "$title_match$body_match$commit_match$comment_match" ]; then
+            echo "Work item reference found." >> "$GITHUB_STEP_SUMMARY"
+            exit 0
+          fi
+
+          {
+            echo ":x: This pull request isn't attached to an Azure DevOps work item."
+            echo
+            echo "Do any one of these:"
+            echo
+            echo "- Add \`AB#<id>\` to the **PR title** (preferred — it survives every merge style):"
+            echo
+            echo '  ```'
+            echo '  feat: add carrier retry backoff AB#1234'
+            echo '  ```'
+            echo "- Add \`AB#<id>\` to the PR description, a commit message, or a comment on this PR."
+          } >> "$GITHUB_STEP_SUMMARY"
+
+          if [ "$ENFORCEMENT" = "warn" ]; then
+            echo "::warning::No linked work item found (enforcement=warn — not failing)."
+            exit 0
+          fi
+
+          echo "::error::No linked work item found. Add 'AB#<id>' to the PR title, e.g. 'feat: add carrier retry backoff AB#1234'."
+          exit 1

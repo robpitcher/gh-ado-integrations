@@ -1,0 +1,92 @@
+:root {
+  --bg: #f4f6f9;
+  --panel: #ffffff;
+  --ink: #1f2933;
+  --muted: #6b7280;
+  --accent: #0067b8;
+  --line: #e5e7eb;
+}
+
+* { box-sizing: border-box; }
+
+body {
+  margin: 0;
+  font-family: 'Segoe UI', system-ui, sans-serif;
+  color: var(--ink);
+  background: var(--bg);
+}
+
+.topbar {
+  background: var(--accent);
+  color: #fff;
+  padding: 14px 24px;
+  display: flex;
+  align-items: baseline;
+  gap: 12px;
+}
+.topbar h1 { font-size: 1.25rem; margin: 0; }
+.tagline { opacity: 0.85; font-size: 0.9rem; }
+
+.layout {
+  display: grid;
+  grid-template-columns: 320px 1fr;
+  gap: 16px;
+  padding: 16px 24px;
+  align-items: start;
+}
+
+.list-pane, .detail-pane {
+  background: var(--panel);
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  padding: 16px;
+}
+
+h2 { font-size: 1rem; margin-top: 0; }
+
+.shipment-list { list-style: none; margin: 0; padding: 0; }
+.shipment-list li {
+  padding: 10px 12px;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  margin-bottom: 8px;
+  cursor: pointer;
+  transition: border-color 0.15s;
+}
+.shipment-list li:hover { border-color: var(--accent); }
+.shipment-list li.selected { border-color: var(--accent); background: #f0f7ff; }
+.shipment-list .sid { font-weight: 600; }
+.shipment-list .sroute { color: var(--muted); font-size: 0.85rem; }
+
+.empty { color: var(--muted); }
+.hidden { display: none; }
+
+.route { color: var(--muted); margin-top: -6px; }
+.meta { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; margin: 12px 0; }
+
+.badge {
+  display: inline-block;
+  padding: 2px 8px;
+  border-radius: 999px;
+  background: #eef2f7;
+  font-size: 0.8rem;
+  text-transform: capitalize;
+}
+.badge.delivered { background: #e6f4ea; color: #1e7e34; }
+.badge.out_for_delivery { background: #fff4e5; color: #b25e00; }
+.badge.in_transit { background: #e7f0fb; color: #0067b8; }
+
+.exception {
+  background: #fdecea;
+  color: #a61b1b;
+  border: 1px solid #f5c6c2;
+  border-radius: 6px;
+  padding: 8px 12px;
+  margin: 8px 0;
+}
+
+.timeline { padding-left: 18px; }
+.timeline li { margin-bottom: 8px; }
+.timeline .tstatus { font-weight: 600; text-transform: capitalize; }
+.timeline .tnote { color: var(--muted); }
+.timeline .tat { color: var(--muted); font-size: 0.8rem; }

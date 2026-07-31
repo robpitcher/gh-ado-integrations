@@ -1,0 +1,257 @@
+# Reusable workflow: derive release membership from merged commits.
+#
+# A release is bounded by tags (<previous semver tag>..HEAD), not by release
+# branches. On each push to main this workflow reads AB#<id> references in that
+# range, links those stories to the matching Release work item, and stamps
+# Custom.ShippedRelease. It never closes stories; completion happens only after a
+# successful production deploy in ado-release-complete.yml.
+name: ADO Release Sync
+
+on:
+  workflow_call:
+    inputs:
+      ado-org-url:
+        required: true
+        type: string
+      ado-project:
+        required: true
+        type: string
+      release-version:
+        required: true
+        type: string
+      since-tag:
+        required: false
+        type: string
+        default: ''
+    secrets:
+      ADO_PAT:
+        required: false
+
+permissions:
+  contents: read
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Ensure tags are present
+        continue-on-error: true
+        run: git fetch --tags --force --prune
+
+      - name: Sync release membership
+        continue-on-error: true
+        shell: bash
+        env:
+          ADO_ORG_URL: ${{ inputs.ado-org-url }}
+          ADO_PROJECT: ${{ inputs.ado-project }}
+          RELEASE_VERSION: ${{ inputs.release-version }}
+          SINCE_TAG: ${{ inputs.since-tag }}
+          ADO_PAT: ${{ secrets.ADO_PAT }}
+        run: |
+          set -u
+
+          if [ -z "${ADO_PAT:-}" ]; then
+            echo "### Release membership sync" >> "$GITHUB_STEP_SUMMARY"
+            echo ":warning: ADO_PAT is not configured; skipping release sync." >> "$GITHUB_STEP_SUMMARY"
+            exit 0
+          fi
+
+          org="${ADO_ORG_URL%/}"
+          if [[ ! "$org" =~ ^https?:// ]]; then
+            org="https://dev.azure.com/$org"
+          fi
+          proj_enc="$(printf '%s' "$ADO_PROJECT" | jq -sRr @uri)"
+          proj_api="$org/$proj_enc/_apis"
+
+          ado_request() {
+            local method="$1"
+            local url="$2"
+            local body="${3-}"
+            local content_type="${4-application/json}"
+            local response
+            if [ -n "$body" ]; then
+              response="$(curl -sS -u ":$ADO_PAT" -X "$method" -H "Content-Type: $content_type" "$url" --data "$body" -w $'\n%{http_code}')"
+            else
+              response="$(curl -sS -u ":$ADO_PAT" -X "$method" -H "Content-Type: $content_type" "$url" -w $'\n%{http_code}')"
+            fi
+            ADO_STATUS="${response##*$'\n'}"
+            ADO_BODY="${response%$'\n'*}"
+          }
+
+          is_ok_status() {
+            [[ "$1" =~ ^2[0-9][0-9]$ ]]
+          }
+
+          ADO_STATUS=""
+          ADO_BODY=""
+
+          semver_re='^v?[0-9]+\.[0-9]+\.[0-9]+$'
+          resolved_tag=""
+          if [ -n "$SINCE_TAG" ]; then
+            resolved_tag="$SINCE_TAG"
+          else
+            described="$(git describe --tags --abbrev=0 --match 'v[0-9]*.[0-9]*.[0-9]*' --match '[0-9]*.[0-9]*.[0-9]*' HEAD 2>/dev/null || true)"
+            if [[ "$described" =~ $semver_re ]]; then
+              resolved_tag="$described"
+            else
+              resolved_tag="$(git tag --merged HEAD | grep -E "$semver_re" | sort -V | tail -n 1 || true)"
+            fi
+          fi
+
+          range_spec="HEAD"
+          if [ -n "$resolved_tag" ]; then
+            range_spec="$resolved_tag..HEAD"
+          fi
+
+          commit_count="$(git rev-list --count "$range_spec" 2>/dev/null || echo 0)"
+          refs="$(
+            git log "$range_spec" --format='%B' 2>/dev/null \
+              | grep -oiE 'AB#[0-9]+' \
+              | tr '[:lower:]' '[:upper:]' \
+              | sed 's/AB#//' \
+              | sort -n -u || true
+          )"
+
+          wiql_payload="$(jq -cn --arg p "$ADO_PROJECT" --arg v "$RELEASE_VERSION" \
+            '{query: ("SELECT [System.Id] FROM WorkItems WHERE [System.TeamProject] = '\''" + $p + "'\'' AND [System.WorkItemType] = '\''Release'\'' AND [Custom.ReleaseVersion] = '\''" + $v + "'\''")}')"
+          ado_request POST "$proj_api/wit/wiql?api-version=7.1" "$wiql_payload"
+          wiql_json="$ADO_BODY"
+          if ! is_ok_status "$ADO_STATUS"; then
+            echo "### Release membership sync — $RELEASE_VERSION" >> "$GITHUB_STEP_SUMMARY"
+            echo ":warning: Could not query Azure DevOps releases (HTTP $ADO_STATUS)." >> "$GITHUB_STEP_SUMMARY"
+            exit 0
+          fi
+
+          release_id="$(jq -r '.workItems[0].id // empty' <<<"$wiql_json" 2>/dev/null || true)"
+          if [ -z "$release_id" ]; then
+            echo "### Release membership sync — $RELEASE_VERSION" >> "$GITHUB_STEP_SUMMARY"
+            echo ":warning: No Release work item found for version \`$RELEASE_VERSION\`." >> "$GITHUB_STEP_SUMMARY"
+            exit 0
+          fi
+
+          ado_request GET "$proj_api/wit/workitems/$release_id?\$expand=all&api-version=7.1"
+          release_json="$ADO_BODY"
+          if ! is_ok_status "$ADO_STATUS"; then
+            echo "### Release membership sync — $RELEASE_VERSION" >> "$GITHUB_STEP_SUMMARY"
+            echo ":warning: Could not load Release work item #$release_id (HTTP $ADO_STATUS)." >> "$GITHUB_STEP_SUMMARY"
+            exit 0
+          fi
+
+          release_title="$(jq -r '.fields["System.Title"] // ""' <<<"$release_json")"
+          release_state="$(jq -r '.fields["System.State"] // ""' <<<"$release_json")"
+
+          if [ "$release_state" = "Closed" ]; then
+            {
+              echo "### Release membership sync — $RELEASE_VERSION"
+              echo
+              echo ":warning: Release **$release_title** is already Closed. No new work items were linked."
+              echo
+              echo "Bump \`version\` in \`package.json\` to open the next release."
+            } >> "$GITHUB_STEP_SUMMARY"
+            exit 0
+          fi
+
+          linked=()
+          already_linked=()
+          unresolved=()
+          drift=()
+
+          if [ -n "$refs" ] && [ "$release_state" = "New" ]; then
+            release_patch='[{"op":"add","path":"/fields/System.State","value":"Active"}]'
+            ado_request PATCH "$proj_api/wit/workitems/$release_id?api-version=7.1" "$release_patch" "application/json-patch+json"
+            ado_request GET "$proj_api/wit/workitems/$release_id?\$expand=all&api-version=7.1"
+            release_json="$ADO_BODY"
+          fi
+
+          while IFS= read -r id; do
+            [ -z "$id" ] && continue
+            ado_request GET "$proj_api/wit/workitems/$id?\$expand=all&api-version=7.1"
+            story_json="$ADO_BODY"
+            if ! is_ok_status "$ADO_STATUS"; then
+              unresolved+=("$id")
+              continue
+            fi
+
+            story_title="$(jq -r '.fields["System.Title"] // ""' <<<"$story_json")"
+            story_url="$(jq -r '.url // ""' <<<"$story_json")"
+            target_release="$(jq -r '.fields["Custom.TargetRelease"] // ""' <<<"$story_json")"
+            shipped_release="$(jq -r '.fields["Custom.ShippedRelease"] // ""' <<<"$story_json")"
+            related_count="$(jq -r --arg u "$story_url" '[.relations[]? | select(.rel=="System.LinkTypes.Related" and .url==$u)] | length' <<<"$release_json")"
+
+            changed=false
+            if [ "$related_count" = "0" ]; then
+              rel_patch="$(jq -cn --arg u "$story_url" '[{op:"add",path:"/relations/-",value:{rel:"System.LinkTypes.Related",url:$u}}]')"
+              ado_request PATCH "$proj_api/wit/workitems/$release_id?api-version=7.1" "$rel_patch" "application/json-patch+json"
+              if is_ok_status "$ADO_STATUS"; then
+                changed=true
+                ado_request GET "$proj_api/wit/workitems/$release_id?\$expand=all&api-version=7.1"
+                release_json="$ADO_BODY"
+              fi
+            fi
+
+            if [ "$shipped_release" != "$RELEASE_VERSION" ]; then
+              ship_patch="$(jq -cn --arg v "$RELEASE_VERSION" '[{op:"add",path:"/fields/Custom.ShippedRelease",value:$v}]')"
+              ado_request PATCH "$proj_api/wit/workitems/$id?api-version=7.1" "$ship_patch" "application/json-patch+json"
+              if is_ok_status "$ADO_STATUS"; then
+                changed=true
+              fi
+            fi
+
+            if [ "$changed" = true ]; then
+              linked+=("AB#$id $story_title")
+            else
+              already_linked+=("AB#$id $story_title")
+            fi
+
+            if [ -n "$target_release" ] && [ "$target_release" != "$RELEASE_VERSION" ]; then
+              drift+=("AB#$id $story_title — targeted **$target_release**, shipping in **$RELEASE_VERSION**")
+            fi
+          done <<< "$refs"
+
+          {
+            echo "### Release membership sync — $RELEASE_VERSION"
+            echo
+            echo "- Release: **$release_title** (#$release_id)"
+            if [ -n "$resolved_tag" ]; then
+              echo "- Commit range: \`$range_spec\` (since tag \`$resolved_tag\`) — $commit_count commit(s)"
+            else
+              echo "- Commit range: \`$range_spec\` (**entire history**; no semver baseline tag found) — $commit_count commit(s)"
+            fi
+            if [ -n "$refs" ]; then
+              echo "- AB# references found: $(wc -l <<<"$refs" | tr -d ' ')"
+            else
+              echo "- AB# references found: 0"
+            fi
+            echo
+            echo "#### Linked"
+            if [ "${#linked[@]}" -eq 0 ]; then
+              echo "_Nothing new this run._"
+            else
+              for item in "${linked[@]}"; do echo "- $item"; done
+            fi
+            echo
+            echo "#### Already linked"
+            if [ "${#already_linked[@]}" -eq 0 ]; then
+              echo "_None._"
+            else
+              for item in "${already_linked[@]}"; do echo "- $item"; done
+            fi
+            echo
+            echo "#### :warning: Unresolved AB# references"
+            if [ "${#unresolved[@]}" -eq 0 ]; then
+              echo "_None._"
+            else
+              for item in "${unresolved[@]}"; do echo "- AB#$item — work item not found"; done
+            fi
+            echo
+            echo "#### :warning: Drift (Target Release != Shipped Release)"
+            if [ "${#drift[@]}" -eq 0 ]; then
+              echo "_None._"
+            else
+              for item in "${drift[@]}"; do echo "- $item"; done
+            fi
+          } >> "$GITHUB_STEP_SUMMARY"
