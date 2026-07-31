@@ -30,8 +30,7 @@ cd provision
 ```
 
 Environment setup and operations: **[administrator lab guide](docs/user-lab-guide.md)** ·
-presenter walkthrough: **[demo lab guide](docs/demo-lab-guide.md)** · provisioner reference:
-**[provision/README.md](provision/README.md)**.
+provisioner reference: **[provision/README.md](provision/README.md)**.
 
 ### Release tracking scenario
 
@@ -41,9 +40,7 @@ defined as the span of commits **between two git tags** — so release membershi
 actually shipped, with no manual relate step. Every push to `main` runs a gated multi-environment
 deploy (`dev` → `stage` → `production`), and a successful, approved production deploy automatically
 closes out the linked work items, publishes GitHub Release notes, and writes the tag that bounds the
-*next* release. The presenter walkthrough is driven by a real work item taken end to end — assigned, implemented,
-pull-requested, merged, deployed — rather than synthetic commits. See the **Release tracking**
-section of the [demo lab guide](docs/demo-lab-guide.md). For environment setup and ongoing
+*next* release. For environment setup and ongoing
 operation, use the [administrator lab guide](docs/user-lab-guide.md). Relevant workflows:
 `.github/workflows/deploy.yml`, `ado-release-sync.yml`, `ado-release-complete.yml`, and
 `pr-workitem-check.yml` (which checks the PR title, body, commits, and comments; release membership

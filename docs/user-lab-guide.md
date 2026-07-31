@@ -4,9 +4,6 @@ This guide is for DevOps engineers and Azure DevOps administrators who want to d
 Logistics lab in their own environment. It focuses on environment preparation, provisioning,
 configuration, validation, operation, and cleanup.
 
-For a presenter-oriented walkthrough with timings and demonstration steps, see
-[`demo-lab-guide.md`](demo-lab-guide.md).
-
 > [!IMPORTANT]
 > This repository is a proof of concept and learning lab. Review and adapt its identity,
 > permissions, secrets, deployment, resilience, and operational controls before applying any
@@ -584,7 +581,6 @@ variables, see [`release-automation-guide.md`](release-automation-guide.md).
 ## 14. Further reading
 
 - [Provisioner reference](../provision/README.md)
-- [Presenter/demo lab guide](demo-lab-guide.md)
 - [Release automation integration guide](release-automation-guide.md)
 - [Customize an inherited process](https://learn.microsoft.com/azure/devops/organizations/settings/work/manage-process)
 - [Configure and customize Azure Boards](https://learn.microsoft.com/azure/devops/boards/configure-customize)

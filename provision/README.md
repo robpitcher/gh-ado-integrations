@@ -2,8 +2,7 @@
 
 PowerShell 7 scripts that build the **Contoso Logistics** Azure DevOps demo environment from
 scratch, with no PAT (they use your `az login` AAD token). For environment setup and operations,
-see the [`administrator lab guide`](../docs/user-lab-guide.md). For the presenter walkthrough and
-evaluation steps, see the [`demo lab guide`](../docs/demo-lab-guide.md).
+see the [`administrator lab guide`](../docs/user-lab-guide.md).
 
 ## Quick start
 
